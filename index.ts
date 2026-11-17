@@ -3,17 +3,15 @@ import { Plugin } from "@opencode/plugin"
 /**
  * OpenCode V2 — communication policy for coding agents.
  *
- * The context hook runs before each primary-agent model request, including
- * continuations after tool use. It encourages visible pre-task explanations,
- * meaningful progress updates, plain-language final reports, and a shared
- * writing style for every reply.
+ * 两件事：
+ * 1. context 钩子：每次主 Agent 模型请求前注入沟通规则（提示词，只强化行为）。
+ * 2. permission.evaluate 钩子：把写入类操作按规则升级成权限确认，真正拦住
+ *    「没交代就动手」和「不可逆 / 对外写入」两类情况。
  *
- * "动手" is defined inside the policy as any write / state-changing action
- * (files, dirs, code, binaries, DB writes, deploy, system settings) so the
- * three reporting phases are unambiguous. Read-only work is excluded.
+ * 提示词里的「动手」有明确定义：任何写入或改状态的动作（文件、目录、代码、
+ * 程序、数据库、部署、系统设置）。只读行为不算，不触发说明。
  *
- * It does NOT create messages itself, block tools, rewrite completed replies,
- * alter code or command arguments, or guarantee model compliance.
+ * 插件不修改代码、命令参数、SQL 或日志，也不改写已完成的答复。
  */
 const COMMUNICATION_POLICY = `
 <coding_agent_communication_policy>
@@ -39,10 +37,16 @@ const COMMUNICATION_POLICY = `
 以下不算“动手”，不需要先写说明：读文件、搜索、看日志、查看 git 历史与 diff、只读查询数据库、编译／类型检查／跑测试这类只产生临时产物的验证。规则里的“先交代”只针对上面的写入动作，不要为纯读取的调查硬凑开场白。
 
 【一、动手之前：先交代，再开始写入】
-1. 涉及多步骤、代码修改、架构调整、依赖升级、环境变更、数据修改或明显风险的任务：在本轮第一次写入动作之前，先向用户发送一段【可见的自然语言说明】，通常 1～3 句话，交代处理目标、会碰到哪些文件／目录／数据表／服务、准备用什么方式改，以及主要风险控制措施。不要只在内部推理中规划，也不要一上来就直接改东西。
+1. 只要本轮要做下面任何一类写入，就在第一次写入动作之前，先向用户发送一段【可见的自然语言说明】，通常 1～3 句话，交代处理目标、会碰到哪些文件／目录／数据表／服务、准备用什么方式改，以及主要风险控制措施：
+   - 多步骤任务、代码修改、架构调整、依赖升级、环境变更、数据修改
+   - git 写操作：commit、push、merge、rebase、reset、checkout 覆盖工作区、打 tag
+   - 发布、部署、回滚、推镜像、发包、调用线上接口写数据
+   - 数据库迁移、建表改表、批量 UPDATE／DELETE、数据修补
+   - 删除或覆盖文件、清目录、覆盖用户未提交的改动
+   说明要具体：不要只在内部推理中规划，也不要一上来就直接改东西。
 2. 涉及已有代码、数据、配置或用户现有成果时，先考虑如何避免覆盖无关修改、误改数据或扩大影响范围。说明你会先检查现状、尊重已有变更、限制修改范围；不要声称已经备份、检查或确认了尚未做过的事情。
 3. 说明方案之后，在用户已授权的范围内【直接继续动手】，不要把计划当成审批申请，不要反复询问“是否继续”。只有超出授权范围、不可逆（删文件、删表、清数据、覆盖用户未提交的改动）或明显高风险的写入需要提前确认。
-4. 简单、低风险、几乎一步就能完成的改动直接做；纯读取的分析和纯问答直接回答。无须固定开场白、硬凑步骤或重复解释，说明力度与写入影响相称。
+4. 第 1 条列出的 git 写操作、发布部署、迁移和清数据，属于对外或不可逆写入，不适用“简单任务直接做”：哪怕用户只说了“提交并推送”“部署一下”，也要在动手前有一句话说明将写什么、影响到哪、怎么回滚。真正可以免说明的只有：纯读取的调查、纯问答，以及单文件、可逆、影响明确的小改动。
 5. 如果用户明确要求静默操作、只给结果或采用其他特定交流方式，优先尊重用户的要求；但仍需就真正重要的风险做必要说明。
 
 【二、动手过程中：汇报关键变化，不播报流水账】
@@ -51,7 +55,7 @@ const COMMUNICATION_POLICY = `
 8. 写入过程中如遇到失败或无法验证，明确说出真实状态并采取合理的下一步。没有做过的检查、构建、测试或部署，不得写成已经完成。
 
 【三、动手之后：用人话把结果讲清楚】
-9. 工作结束时，先直接回答问题或给出结果，不以“本轮完成闭环”“已完成相关链路梳理”等空话开场。代码改动说明改了哪些文件的哪些内容、原因及关键位置；数据库操作说明实际跑了哪条写入语句、影响哪些表和多少行、事务是否提交；文件与目录操作说明新增、删除、移动了哪些路径；分析任务说明结论与依据；测试任务说明真正跑过的命令及结果。
+9. 工作结束时，先直接回答问题或给出结果，不以“本轮完成闭环”“已完成相关链路梳理”等空话开场。代码改动说明改了哪些文件的哪些内容、原因及关键位置；数据库操作说明实际跑了哪条写入语句、影响哪些表和多少行、事务是否提交；文件与目录操作说明新增、删除、移动了哪些路径；git 操作说明提交号、推到哪个远端分支；分析任务说明结论与依据；测试任务说明真正跑过的命令及结果。
 10. 明确区分“已修改”“已构建”“已启动”“已落库”“已验证”和“推测可行”。写操作要说清落到哪一层：只改了工作区未保存／未提交，还是已提交、已推送、已部署、已写入数据库。如有未完成项、失败或残留风险，直接说清楚；不要把推测说成事实。
 11. 措辞、中文表达和排版按文末【四、表达风格】执行；本节只规定要说哪些内容，不降低表达风格的要求。
 12. 根据任务难度安排篇幅：简单任务几句话，复杂任务可分段说明。避免机械套用“背景／方案／收益／风险／总结”，也不要为显得严谨而安排无意义的单元测试、全量构建或重复检查；验证应与实际风险相称，仍须服从项目已有测试约定。
@@ -110,6 +114,7 @@ const COMMUNICATION_POLICY = `
 
 【沟通示例】
 合适的动手前说明：“我先看一下当前分支的修改和相关配置，再调整插件的回复规则。只改插件自身，不覆盖已有项目改动；改完检查代码能否正常解析，实际加载效果会另外说明。”
+合适的提交推送前说明：“本地有 2 个文件改动，我准备提交并推到 origin/main，提交信息写在下面；这个仓库没有分支保护，推上去就对外可见，需要回滚用 git reset --hard 回到上一个提交。”
 不合适：“即将展开全链路治理、完成开发任务闭环，请确认是否允许启动。”
 合适的阶段反馈：“已经找到问题：升级时旧版的两处定制没有带过来。我会只补这两处，先不动其他模块。”
 合适的结果：“规则已经写入插件，语法检查通过；还没有在你的 OpenCode 中实际加载，所以暂时不能确认运行效果。”
@@ -118,13 +123,146 @@ const COMMUNICATION_POLICY = `
 </coding_agent_communication_policy>
 `.trim()
 
+/** 只读类操作：永远不拦。名单外的写入类动作交给软闸门判断。 */
+const READ_ONLY_ACTIONS = [
+  "read",
+  "grep",
+  "glob",
+  "list",
+  "ls",
+  "search",
+  "webfetch",
+  "websearch",
+  "web",
+  "question",
+  "skill",
+  "permission",
+  "context",
+  "info",
+  "status",
+  "log",
+  "diff",
+  "patch_read",
+]
+
+/**
+ * 不可逆或对外可见的写入：无论模型有没有先交代，都先弹确认。
+ * 只匹配命令文本，宁可漏判也不要误伤正常命令。
+ */
+const IRREVERSIBLE_COMMANDS = [
+  /\bgit\s+(push|merge|rebase|reset|tag|clean|filter-branch|gc)\b/i,
+  /\bgit\s+checkout\s+--\b/i,
+  /\b(rm|rmdir|del|erase)\b/i,
+  /\bRemove-Item\b|\bRemove-PSDrive\b/i,
+  /\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX)\b|\bTRUNCATE\b|\bDELETE\s+FROM\b|\bALTER\s+TABLE\b/i,
+  /\b(docker|nerdctl|podman)\s+push\b/i,
+  /\b(npm|pnpm|yarn|pub|twine|cargo)\s+publish\b/i,
+  /\b(kubectl|helm|terraform|ansible-playbook|vagrant)\b/i,
+  /\b(ssh|scp|rsync|sftp)\b/i,
+  /\b(aws|az|gcloud|gsutil)\b.*\b(delete|deploy|push|apply|sync)\b/i,
+  /\btaskkill\b|\bsc\s+delete\b|\breg\s+(add|delete|import)\b|\bSet-ItemProperty\b.*HKLM/i,
+  /\bdeploy(\.sh|\.ps1|\.bat)\b|\bdeployments?[\\/]/i,
+  /\b(mkfs|diskpart)\b|\b(Format-Volume|Clear-Disk|Initialize-Disk)\b/i,
+]
+
+/** 命中即视为会改状态的命令（软闸门用）。名单外的写入类动作按写入处理。 */
+const WRITE_COMMANDS = [
+  /\bgit\s+(add|commit|am|cherry-pick|apply|stash|restore|switch\s+-c|branch\s+-|remote\s+set-head)\b/i,
+  /\b(npm|pnpm|yarn|bun)\s+(install|add|update|remove|link)\b/i,
+  /\b(pip|uv|poetry|conda)\s+(install|uninstall|update)\b/i,
+  /\b(mv|move|Move-Item|Copy-Item|cp|copy|mkdir|md|New-Item|ni|Out-File|Set-Content|Add-Content|tee)\b/i,
+  /\b(mysql|psql|sqlplus|sqlite3|clickhouse-client)\b/i,
+  /\b(INSERT|UPDATE|CREATE\s+TABLE|CREATE\s+INDEX)\b/i,
+  /\b(nuget|dotnet)\s+(add|restore|tool\s+install)\b/i,
+  /\bnet\s+(user|localgroup|share)\s/i,
+]
+
+const HARD_MESSAGE =
+  "沟通规则拦截：本次是不可逆或对外可见的写入（推送、发布、部署、删除、改表、远程执行）。" +
+  "请先用 1～3 句话向用户说明：将写入什么、影响哪些文件／表／远端资源、失败后怎么回滚；说明清楚后再批准。"
+
+const SOFT_MESSAGE =
+  "沟通规则拦截：本轮还没有向用户交代就要写入。" +
+  "请先用 1～3 句话说明：目标、会改哪些文件或数据、用什么方式改、如何避免覆盖已有改动；说明之后再发起本次操作。"
+
+/** 说明文字少于这个长度就当作“没交代”。中文一字算一个字符，16 字约等于一句最短的完整说明。 */
+const MIN_EXPLANATION_CHARS = 16
+
+function isReadOnlyAction(action) {
+  const name = String(action ?? "").toLowerCase()
+  if (!name) return true
+  if (READ_ONLY_ACTIONS.includes(name)) return true
+  return /^(read|list|get|search|grep|glob|fetch|view|show|check|diff|status|log|question|skill)$/.test(name)
+}
+
+function isIrreversible(text) {
+  return IRREVERSIBLE_COMMANDS.some((re) => re.test(text))
+}
+
+function isWriteCommand(text) {
+  return WRITE_COMMANDS.some((re) => re.test(text))
+}
+
+/**
+ * 取本轮模型在发起工具调用之前已经输出的可见文字。
+ * 返回 null 表示消息结构不认识（此时跳过软闸门，避免误弹）。
+ */
+function leadingAssistantText(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] ?? {}
+    const info = message.info ?? message
+    const role = info.role ?? message.role
+    if (role === "user") return ""
+    if (role !== "assistant") continue
+
+    const parts = message.parts
+    if (!Array.isArray(parts)) return null
+
+    let text = ""
+    for (const part of parts) {
+      if (part?.type === "text") text += String(part.text ?? "")
+      else if (part?.type === "tool" || part?.tool) break
+    }
+    return text.trim()
+  }
+  return ""
+}
+
 export default Plugin.define({
   id: "human-answer",
   async setup(ctx) {
-    // Primary-agent model calls, including calls after tool continuations.
-    // Each injection affects only the outgoing model request, not history.
+    const gate = ctx.options?.gate !== false
+
     await ctx.session.hook("context", (event) => {
       event.system.push({ type: "text", text: COMMUNICATION_POLICY })
+    })
+
+    if (!gate) return
+
+    await ctx.permission.hook("evaluate", async (event) => {
+      const resources = event.resources ?? []
+      if (resources.length === 0) return
+      const text = resources.join("\n")
+
+      if (isIrreversible(text)) {
+        event.effect = "ask"
+        event.message = `${HARD_MESSAGE}\n本次操作：${text.slice(0, 400)}`
+        return
+      }
+
+      if (isReadOnlyAction(event.action)) return
+      if (text.trim().length === 0) return
+
+      // bash 只对确认会改状态的命令做软闸门，其余命令（含只读管道）不打扰
+      if (String(event.action ?? "").toLowerCase() === "bash" && !isWriteCommand(text)) return
+
+      const messages = await ctx.session.context({ sessionID: event.sessionID })
+      const explanation = leadingAssistantText(messages)
+      if (explanation === null) return
+      if (explanation.length >= MIN_EXPLANATION_CHARS) return
+
+      event.effect = "ask"
+      event.message = `${SOFT_MESSAGE}\n本次操作：${text.slice(0, 400)}`
     })
   },
 })
